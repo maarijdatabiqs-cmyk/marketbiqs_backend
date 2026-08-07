@@ -88,20 +88,43 @@ async def scrape_website(db: AsyncSession, agency_id: str, url: str) -> dict[str
         return {"url": url, "markdown": "", "status": "error", "detail": str(exc)[:500]}
 
 
-async def serp_visibility(db: AsyncSession, agency_id: str, query: str) -> dict[str, Any]:
+async def serp_visibility(
+    db: AsyncSession,
+    agency_id: str,
+    query: str,
+    *,
+    location: str | None = None,
+    gl: str | None = None,
+) -> dict[str, Any]:
     key = await resolve_serp(db, agency_id)
     if not key:
         return {"query": query, "status": "skipped", "organic": []}
     try:
+        params: dict[str, Any] = {"engine": "google", "q": query, "api_key": key, "num": 10}
+        if location:
+            params["location"] = location
+        if gl:
+            params["gl"] = gl
         async with httpx.AsyncClient(timeout=45) as client:
             response = await client.get(
                 "https://serpapi.com/search.json",
-                params={"engine": "google", "q": query, "api_key": key, "num": 10},
+                params=params,
             )
             if response.status_code >= 400:
-                return {"query": query, "status": "error", "detail": response.text[:500], "organic": []}
+                logger.warning(
+                    "SerpAPI error status=%s query=%s detail=%s",
+                    response.status_code,
+                    query[:120],
+                    response.text[:200],
+                )
+                return {
+                    "query": query,
+                    "status": "unauthorized" if response.status_code in {401, 403} else "error",
+                    "detail": response.text[:500],
+                    "organic": [],
+                }
             data = response.json()
-            await track_usage(db, agency_id, "serp_search", 1, {"query": query})
+            await track_usage(db, agency_id, "serp_search", 1, {"query": query, "location": location, "gl": gl})
             organic = [
                 {
                     "position": i.get("position"),

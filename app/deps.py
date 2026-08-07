@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -40,6 +41,57 @@ def _name_from_claims(payload: dict, email: str) -> str:
     return email.split("@")[0][:255] or "User"
 
 
+async def _ensure_user_row(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    email: str,
+    full_name: str,
+) -> User:
+    """Create app user for Auth UUID; tolerate parallel /me races."""
+    user = await db.get(User, user_id)
+    if user:
+        return user
+
+    # Fresh Auth user — claim email if a legacy row still holds it.
+    legacy = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+    if legacy and legacy.id != user_id:
+        memberships = (
+            await db.execute(select(AgencyMember).where(AgencyMember.user_id == legacy.id))
+        ).scalars().all()
+        for membership in memberships:
+            membership.user_id = user_id
+        await db.delete(legacy)
+        await db.flush()
+        user = await db.get(User, user_id)
+        if user:
+            return user
+
+    user = User(
+        id=user_id,
+        email=email,
+        full_name=full_name,
+        hashed_password=None,
+    )
+    try:
+        async with db.begin_nested():
+            db.add(user)
+            await db.flush()
+    except IntegrityError:
+        # Parallel /api/auth/me (or bootstrap) already inserted this Auth user.
+        existing = await db.get(User, user_id)
+        if existing:
+            return existing
+        by_email = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+        if by_email:
+            return by_email
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Could not create user account — please try again",
+        ) from None
+    return user
+
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
     db: AsyncSession = Depends(get_db),
@@ -57,43 +109,22 @@ async def get_current_user(
     email = _email_from_claims(payload)
     full_name = _name_from_claims(payload, email)
 
-    user = await db.get(User, user_id)
-    if user:
-        if email and user.email != email:
-            conflict = (
-                await db.execute(select(User).where(User.email == email, User.id != user_id))
-            ).scalar_one_or_none()
-            if conflict:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="Email already linked to another account",
-                )
-            user.email = email
-        if full_name and (not user.full_name or user.full_name == user.email.split("@")[0]):
-            user.full_name = full_name
-        if not user.is_active:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
-        await db.flush()
-        return user
+    user = await _ensure_user_row(db, user_id=user_id, email=email, full_name=full_name)
 
-    # Fresh Auth user — claim email if a legacy row still holds it.
-    legacy = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
-    if legacy and legacy.id != user_id:
-        memberships = (
-            await db.execute(select(AgencyMember).where(AgencyMember.user_id == legacy.id))
-        ).scalars().all()
-        for membership in memberships:
-            membership.user_id = user_id
-        await db.delete(legacy)
-        await db.flush()
-
-    user = User(
-        id=user_id,
-        email=email,
-        full_name=full_name,
-        hashed_password=None,
-    )
-    db.add(user)
+    if email and user.email != email:
+        conflict = (
+            await db.execute(select(User).where(User.email == email, User.id != user_id))
+        ).scalar_one_or_none()
+        if conflict:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Email already linked to another account",
+            )
+        user.email = email
+    if full_name and (not user.full_name or user.full_name == user.email.split("@")[0]):
+        user.full_name = full_name
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     await db.flush()
     return user
 

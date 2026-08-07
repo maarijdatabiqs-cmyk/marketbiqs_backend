@@ -20,6 +20,9 @@ from app.services.supabase_client import ensure_reports_bucket, ping_supabase, s
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("marketbiqs")
+# APScheduler otherwise floods Railway with "Running job … executed successfully" every minute
+logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
+logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
 
 settings = get_settings()
 scheduler = AsyncIOScheduler()
@@ -42,8 +45,12 @@ async def scheduled_ai_pipeline() -> None:
 
 
 async def scheduled_delivery_pipeline() -> None:
-    """Send due client deliveries based on delivery_schedule_cron."""
+    """Send due client deliveries based on delivery_schedule_cron.
+
+    Runs often so cron minutes are not missed; quiet unless a delivery is actually sent.
+    """
     now = datetime.utcnow()
+    sent = 0
     async with AsyncSessionLocal() as db:
         clients = (
             await db.execute(select(ClientBrand).where(ClientBrand.is_active.is_(True)))
@@ -74,9 +81,13 @@ async def scheduled_delivery_pipeline() -> None:
             try:
                 await action_deliver(db, agency, client, report=report, message=None)
                 await db.commit()
+                sent += 1
+                logger.info("Scheduled delivery sent for client=%s agency=%s", client.id, agency.id)
             except Exception:
                 logger.exception("Scheduled delivery failed for client %s", client.id)
                 await db.rollback()
+    if sent:
+        logger.info("scheduled_delivery_pipeline finished sent=%s", sent)
 
 
 @asynccontextmanager

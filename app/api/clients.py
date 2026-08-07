@@ -48,12 +48,15 @@ async def _enrich_client(db: AsyncSession, client: ClientBrand) -> ClientOut:
 
 
 @router.get("", response_model=list[ClientOut])
-async def list_clients(ctx: AuthContext = Depends(get_auth_context), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(ClientBrand)
-        .where(ClientBrand.agency_id == ctx.agency.id)
-        .order_by(ClientBrand.created_at.desc())
-    )
+async def list_clients(
+    ctx: AuthContext = Depends(get_auth_context),
+    db: AsyncSession = Depends(get_db),
+    include_inactive: bool = False,
+):
+    stmt = select(ClientBrand).where(ClientBrand.agency_id == ctx.agency.id)
+    if not include_inactive:
+        stmt = stmt.where(ClientBrand.is_active.is_(True))
+    result = await db.execute(stmt.order_by(ClientBrand.created_at.desc()))
     clients = list(result.scalars().all())
     return [await _enrich_client(db, c) for c in clients]
 

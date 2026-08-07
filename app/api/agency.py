@@ -254,7 +254,9 @@ async def dashboard(ctx: AuthContext = Depends(get_auth_context), db: AsyncSessi
 
     clients = (
         await db.execute(
-            select(ClientBrand).where(ClientBrand.agency_id == agency_id).order_by(ClientBrand.created_at.desc())
+            select(ClientBrand)
+            .where(ClientBrand.agency_id == agency_id, ClientBrand.is_active.is_(True))
+            .order_by(ClientBrand.created_at.desc())
         )
     ).scalars().all()
     portfolio = []

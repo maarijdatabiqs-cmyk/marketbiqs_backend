@@ -337,7 +337,7 @@ class AutoRunRequest(BaseModel):
     competitor_count: int = Field(default=5, ge=1, le=10)
     competitor_mode: str = Field(
         default="add",
-        description="update = refresh existing rivals; add = find N new rivals and keep previous ones",
+        description="update = refresh existing; add = find N new and keep previous; replace = clear auto rivals then find a fresh set",
     )
 
     @field_validator("competitor_scope")
@@ -360,8 +360,8 @@ class AutoRunRequest(BaseModel):
     @classmethod
     def _mode(cls, value: str) -> str:
         cleaned = (value or "add").strip().lower()
-        if cleaned not in {"add", "update"}:
-            raise ValueError("competitor_mode must be add or update")
+        if cleaned not in {"add", "update", "replace"}:
+            raise ValueError("competitor_mode must be add, update, or replace")
         return cleaned
 
 
